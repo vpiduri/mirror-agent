@@ -5,8 +5,8 @@
 # Signal handling: SIGTERM/SIGINT stops both processes cleanly.
 set -euo pipefail
 
-APIGEE_PORT="${APIGEE_PORT:-8080}"
-EWP_URL="${EWP_URL:-http://ewp-sim:8081}"
+APIGEE_PORT="${APIGEE_PORT:-9090}"
+EWP_URL="${EWP_URL:-http://ewp-sim:9091}"
 BPF_OBJ="${BPF_OBJ:-/ebpf/mirror.bpf.o}"
 IFACE="${IFACE:-eth0}"
 

@@ -6,13 +6,13 @@ version: "3.9"
 #
 #    ┌─────────────────── apigee container (= APIGEE VM) ──────────────────┐
 #    │                                                                       │
-#    │  eth0 ──► [TC ingress eBPF hook]──► apigee-sim process (:8080)       │
+#    │  eth0 ──► [TC ingress eBPF hook]──► apigee-sim process (:9090)       │
 #    │                      │                                                │
 #    │                 (mirror copy)                                         │
 #    └──────────────────────┼────────────────────────────────────────────────┘
 #                           │
 #                           ▼
-#               ewp-sim (Enterprise Web Proxy) (:8081)
+#               ewp-sim (Enterprise Web Proxy) (:9091)
 #
 #  No network_mode tricks needed — both processes share the same container
 #  network namespace natively, matching the VM topology exactly.
@@ -38,10 +38,10 @@ services:
       mirror-net:
         ipv4_address: 172.28.0.10
     ports:
-      - "8080:8080"
+      - "9090:9090"
     environment:
-      APIGEE_PORT: "8080"
-      EWP_URL: "http://ewp-sim:8081"
+      APIGEE_PORT: "9090"
+      EWP_URL: "http://ewp-sim:9091"
       IFACE: "eth0"
       BPF_OBJ: "/ebpf/mirror.bpf.o"
     # eBPF requires these capabilities (same as running with sudo on a VM).
@@ -52,10 +52,11 @@ services:
       - BPF
     security_opt:
       - seccomp:unconfined
-    volumes:
-      - /sys/fs/bpf:/sys/fs/bpf
+    # No /sys/fs/bpf volume mount: our maps are FD-only (no pinning), so the
+    # host bpffs state doesn't matter. The entrypoint mounts bpffs inside the
+    # container's own mount namespace if needed.
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-sf", "http://localhost:9090/health"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -74,9 +75,9 @@ services:
       mirror-net:
         ipv4_address: 172.28.0.11
     ports:
-      - "8081:8081"
+      - "9091:9091"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:9091/health"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -94,8 +95,8 @@ services:
     command:
       - |
         apk add --no-cache curl > /dev/null 2>&1
-        echo "Load generator ready — sending traffic to APIGEE (:8080)"
-        echo "eBPF mirror agent will relay each request to EWP (:8081)"
+        echo "Load generator ready — sending traffic to APIGEE (:9090)"
+        echo "eBPF mirror agent will relay each request to EWP (:9091)"
 
         i=0
         while true; do
@@ -104,25 +105,25 @@ services:
           echo "=== Round $i  $(date) ==="
 
           echo "→ GET /health"
-          curl -sf http://apigee:8080/health
+          curl -sf http://apigee:9090/health
 
           echo ""
           echo "→ GET /api/v1/products"
-          curl -sf http://apigee:8080/api/v1/products
+          curl -sf http://apigee:9090/api/v1/products
 
           echo ""
           echo "→ POST /api/v1/orders"
-          curl -sf -X POST http://apigee:8080/api/v1/orders \
+          curl -sf -X POST http://apigee:9090/api/v1/orders \
             -H "Content-Type: application/json" \
             -d "{\"customerId\":\"cust-$i\",\"items\":[{\"sku\":\"prod-001\",\"qty\":2}]}"
 
           echo ""
           echo "→ GET /api/v1/users/user-$i"
-          curl -sf "http://apigee:8080/api/v1/users/user-$i"
+          curl -sf "http://apigee:9090/api/v1/users/user-$i"
 
           echo ""
           echo "── EWP validation (pass rate):"
-          curl -sf http://ewp-sim:8081/validation-report \
+          curl -sf http://ewp-sim:9091/validation-report \
             | grep -o '"pass_rate":"[^"]*"' || true
 
           sleep 5

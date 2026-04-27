@@ -7,14 +7,14 @@
 # Usage:
 #   sudo bash deploy-on-vm.sh \
 #       --iface eth0 \
-#       --apigee-port 8080 \
-#       --ewp http://ewp-host:8081
+#       --apigee-port 9090 \
+#       --ewp http://ewp-host:9091
 #
 set -euo pipefail
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 IFACE="eth0"
-APIGEE_PORT="8080"
+APIGEE_PORT="9090"
 EWP_URL=""
 INSTALL_DIR="/opt/ebpf-mirror"
 BPF_OBJ="$INSTALL_DIR/mirror.bpf.o"
@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$EWP_URL" ]]; then
-    echo "ERROR: --ewp <url> is required (e.g. --ewp http://ewp-host:8081)"
+    echo "ERROR: --ewp <url> is required (e.g. --ewp http://ewp-host:9091)"
     exit 1
 fi
 
@@ -81,9 +81,12 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 echo ""
 echo "Compiling eBPF program..."
+TRIPLE=$(uname -m)-linux-gnu
+[ "$(uname -m)" = "x86_64" ]  && TRIPLE=x86_64-linux-gnu
+[ "$(uname -m)" = "aarch64" ] && TRIPLE=aarch64-linux-gnu
+rm -rf /usr/include/asm && ln -s /usr/include/${TRIPLE}/asm /usr/include/asm
 clang -O2 -g -target bpf \
-    -D__KERNEL__ \
-    -I/usr/include/x86_64-linux-gnu \
+    -I/usr/include/${TRIPLE} \
     -I/usr/include \
     -c "$REPO_ROOT/kernel/mirror.bpf.c" \
     -o "$BPF_OBJ"

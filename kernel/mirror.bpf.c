@@ -81,7 +81,8 @@ int mirror_ingress(struct __sk_buff *skb)
     if (iph->protocol != 6) /* not TCP */
         return TC_ACT_OK;
 
-    __u32 iph_len = iph->ihl * 4;
+    /* Mask ihl to 4 bits so the verifier knows iph_len is in [0, 60]. */
+    __u32 iph_len = ((__u32)iph->ihl & 0xF) * 4;
 
     /* ── TCP ──────────────────────────────────────────────── */
     struct tcphdr *tcph = (void *)iph + iph_len;
@@ -99,15 +100,21 @@ int mirror_ingress(struct __sk_buff *skb)
     if (cnt)
         __sync_fetch_and_add(cnt, 1);
 
-    __u32 tcph_len   = tcph->doff * 4;
+    /* Mask doff to 4 bits so the verifier knows tcph_len is in [0, 60]. */
+    __u32 tcph_len   = ((__u32)tcph->doff & 0xF) * 4;
     __u32 hdr_offset = sizeof(struct ethhdr) + iph_len + tcph_len;
-    __u32 pkt_len    = skb->len;
 
-    /* Skip pure ACKs with no payload */
-    if (pkt_len <= hdr_offset)
+    /* Compute payload length in 64-bit signed so the verifier can track an
+     * explicit non-negative range.  A plain u32 subtraction leaves the signed
+     * upper bound at UINT32_MAX, which the verifier treats as potentially
+     * negative, causing R4 rejection on bpf_skb_load_bytes. */
+    __s64 pay_len = (__s64)skb->len - (__s64)hdr_offset;
+    if (pay_len <= 0)
         return TC_ACT_OK;
-
-    __u32 payload_len = pkt_len - hdr_offset;
+    if (pay_len > MAX_PAYLOAD_SIZE)
+        pay_len = MAX_PAYLOAD_SIZE;
+    /* Verifier now knows: 1 <= pay_len <= MAX_PAYLOAD_SIZE (signed 64-bit). */
+    __u32 copy_len = (__u32)pay_len;
 
     /* Reserve a ring buffer slot */
     struct pkt_event *ev = bpf_ringbuf_reserve(&rb, sizeof(*ev), 0);
@@ -123,9 +130,6 @@ int mirror_ingress(struct __sk_buff *skb)
     ev->dst_ip   = iph->daddr;
     ev->src_port = bpf_ntohs(tcph->source);
     ev->dst_port = bpf_ntohs(tcph->dest);
-
-    /* Clamp copy length — verifier sees copy_len <= MAX_PAYLOAD_SIZE */
-    __u32 copy_len = payload_len < MAX_PAYLOAD_SIZE ? payload_len : MAX_PAYLOAD_SIZE;
     ev->payload_len = (__u16)copy_len;
     ev->tcp_flags = ((__u8)tcph->fin)       |
                     ((__u8)tcph->syn  << 1) |
@@ -134,11 +138,9 @@ int mirror_ingress(struct __sk_buff *skb)
                     ((__u8)tcph->ack  << 4);
     ev->_pad = 0;
 
-    if (copy_len > 0 && copy_len <= MAX_PAYLOAD_SIZE) {
-        long r = bpf_skb_load_bytes(skb, hdr_offset, ev->payload, copy_len);
-        if (r < 0)
-            ev->payload_len = 0;
-    }
+    long r = bpf_skb_load_bytes(skb, hdr_offset, ev->payload, copy_len);
+    if (r < 0)
+        ev->payload_len = 0;
 
     bpf_ringbuf_submit(ev, 0);
     return TC_ACT_OK;

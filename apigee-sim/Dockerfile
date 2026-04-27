@@ -10,15 +10,27 @@
 FROM ubuntu:22.04 AS ebpf-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        clang llvm libbpf-dev linux-headers-generic linux-libc-dev \
+        clang llvm libbpf-dev linux-libc-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# clang -target bpf doesn't inherit the host arch's system include path, so
+# #include <asm/types.h> fails. Detect the multiarch triple at build time
+# (x86_64-linux-gnu or aarch64-linux-gnu) and symlink it into /usr/include/asm
+# so the path is resolvable regardless of host architecture.
+RUN TRIPLE=$(uname -m)-linux-gnu && \
+    [ "$(uname -m)" = "x86_64" ] && TRIPLE=x86_64-linux-gnu || true && \
+    [ "$(uname -m)" = "aarch64" ] && TRIPLE=aarch64-linux-gnu || true && \
+    rm -rf /usr/include/asm && \
+    ln -s /usr/include/${TRIPLE}/asm /usr/include/asm
 
 WORKDIR /build
 COPY kernel/mirror.bpf.c .
 
-RUN clang -O2 -g -target bpf \
-        -D__KERNEL__ \
-        -I/usr/include/x86_64-linux-gnu \
+RUN TRIPLE=$(uname -m)-linux-gnu && \
+    [ "$(uname -m)" = "x86_64" ] && TRIPLE=x86_64-linux-gnu || true && \
+    [ "$(uname -m)" = "aarch64" ] && TRIPLE=aarch64-linux-gnu || true && \
+    clang -O2 -g -target bpf \
+        -I/usr/include/${TRIPLE} \
         -I/usr/include \
         -c mirror.bpf.c -o mirror.bpf.o
 
@@ -51,6 +63,6 @@ COPY --from=go-builder   /out/mirror-agent  /mirror-agent
 COPY --from=ebpf-builder /build/mirror.bpf.o /ebpf/mirror.bpf.o
 COPY apigee-sim/entrypoint.sh /entrypoint.sh
 
-EXPOSE 8080
+EXPOSE 9090
 
 ENTRYPOINT ["/entrypoint.sh"]

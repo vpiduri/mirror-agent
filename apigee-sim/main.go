@@ -17,7 +17,7 @@ import (
 var requestCount atomic.Int64
 
 func main() {
-	port := flag.Int("port", 8080, "listen port")
+	port := flag.Int("port", 9090, "listen port")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "[APIGEE] ", log.LstdFlags)

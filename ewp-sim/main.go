@@ -36,7 +36,7 @@ type ValidationEntry struct {
 }
 
 func main() {
-	port := flag.Int("port", 8081, "listen port")
+	port := flag.Int("port", 9091, "listen port")
 	flag.Parse()
 
 	logger := log.New(os.Stdout, "[EWP] ", log.LstdFlags)

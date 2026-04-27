@@ -11,8 +11,8 @@ import (
 
 func main() {
 	iface := flag.String("iface", "eth0", "network interface to attach TC hook")
-	port := flag.Uint("port", 8080, "target port to mirror (APIGEE-sim port)")
-	ewpAddr := flag.String("ewp", "http://ewp-sim:8081", "EWP base URL to mirror traffic to")
+	port := flag.Uint("port", 9090, "target port to mirror (APIGEE-sim port)")
+	ewpAddr := flag.String("ewp", "http://ewp-sim:9091", "EWP base URL to mirror traffic to")
 	bpfObj := flag.String("bpf", "/ebpf/mirror.bpf.o", "path to compiled eBPF object file")
 	flag.Parse()
 
