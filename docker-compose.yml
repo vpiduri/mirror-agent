@@ -1,0 +1,130 @@
+version: "3.9"
+
+# ── Traffic mirroring lab ─────────────────────────────────────────────────────
+#
+#  The apigee container runs TWO processes — exactly like a production VM:
+#
+#    ┌─────────────────── apigee container (= APIGEE VM) ──────────────────┐
+#    │                                                                       │
+#    │  eth0 ──► [TC ingress eBPF hook]──► apigee-sim process (:8080)       │
+#    │                      │                                                │
+#    │                 (mirror copy)                                         │
+#    └──────────────────────┼────────────────────────────────────────────────┘
+#                           │
+#                           ▼
+#               ewp-sim (Enterprise Web Proxy) (:8081)
+#
+#  No network_mode tricks needed — both processes share the same container
+#  network namespace natively, matching the VM topology exactly.
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  mirror-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
+
+services:
+
+  # ── APIGEE + eBPF mirror agent (combined, mirrors the VM setup) ───────────
+  apigee:
+    build:
+      context: .
+      dockerfile: apigee-sim/Dockerfile
+    container_name: apigee
+    hostname: apigee
+    networks:
+      mirror-net:
+        ipv4_address: 172.28.0.10
+    ports:
+      - "8080:8080"
+    environment:
+      APIGEE_PORT: "8080"
+      EWP_URL: "http://ewp-sim:8081"
+      IFACE: "eth0"
+      BPF_OBJ: "/ebpf/mirror.bpf.o"
+    # eBPF requires these capabilities (same as running with sudo on a VM).
+    cap_add:
+      - NET_ADMIN
+      - SYS_ADMIN
+      - NET_RAW
+      - BPF
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      - /sys/fs/bpf:/sys/fs/bpf
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      ewp-sim:
+        condition: service_healthy
+
+  # ── EWP simulator (Enterprise Web Proxy) ─────────────────────────────────
+  ewp-sim:
+    build:
+      context: .
+      dockerfile: ewp-sim/Dockerfile
+    container_name: ewp-sim
+    hostname: ewp-sim
+    networks:
+      mirror-net:
+        ipv4_address: 172.28.0.11
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Load generator ────────────────────────────────────────────────────────
+  load-gen:
+    image: alpine:3.19
+    container_name: load-gen
+    networks:
+      - mirror-net
+    depends_on:
+      apigee:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        apk add --no-cache curl > /dev/null 2>&1
+        echo "Load generator ready — sending traffic to APIGEE (:8080)"
+        echo "eBPF mirror agent will relay each request to EWP (:8081)"
+
+        i=0
+        while true; do
+          i=$((i + 1))
+          echo ""
+          echo "=== Round $i  $(date) ==="
+
+          echo "→ GET /health"
+          curl -sf http://apigee:8080/health
+
+          echo ""
+          echo "→ GET /api/v1/products"
+          curl -sf http://apigee:8080/api/v1/products
+
+          echo ""
+          echo "→ POST /api/v1/orders"
+          curl -sf -X POST http://apigee:8080/api/v1/orders \
+            -H "Content-Type: application/json" \
+            -d "{\"customerId\":\"cust-$i\",\"items\":[{\"sku\":\"prod-001\",\"qty\":2}]}"
+
+          echo ""
+          echo "→ GET /api/v1/users/user-$i"
+          curl -sf "http://apigee:8080/api/v1/users/user-$i"
+
+          echo ""
+          echo "── EWP validation (pass rate):"
+          curl -sf http://ewp-sim:8081/validation-report \
+            | grep -o '"pass_rate":"[^"]*"' || true
+
+          sleep 5
+        done
+    restart: unless-stopped
