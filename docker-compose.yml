@@ -44,6 +44,12 @@ services:
       EWP_URL: "http://ewp-sim:9091"
       IFACE: "eth0"
       BPF_OBJ: "/ebpf/mirror.bpf.o"
+      # MIRROR_ROUTES: JSON array of {"apigee": "...", "ewp": "..."} rules.
+      # Only paths matching a rule are mirrored; unmatched paths are dropped.
+      # Leave empty (or omit) to mirror every path unchanged.
+      # Example — mirror products + orders only, mapping to the same EWP paths:
+      #   MIRROR_ROUTES: '[{"apigee":"/api/v1/products","ewp":"/api/v1/products"},{"apigee":"/api/v1/orders","ewp":"/api/v1/orders"}]'
+      MIRROR_ROUTES: ""
     # eBPF requires these capabilities (same as running with sudo on a VM).
     cap_add:
       - NET_ADMIN

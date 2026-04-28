@@ -10,11 +10,15 @@ import (
 )
 
 func main() {
-	iface := flag.String("iface", "eth0", "network interface to attach TC hook")
-	port := flag.Uint("port", 9090, "target port to mirror (APIGEE-sim port)")
-	ewpAddr := flag.String("ewp", "http://ewp-sim:9091", "EWP base URL to mirror traffic to")
-	bpfObj := flag.String("bpf", "/ebpf/mirror.bpf.o", "path to compiled eBPF object file")
+	iface    := flag.String("iface",  "eth0",                  "network interface to attach TC hook")
+	port     := flag.Uint("port",    9090,                     "target port to mirror (APIGEE-sim port)")
+	ewpAddr  := flag.String("ewp",   "http://ewp-sim:9091",    "EWP base URL to mirror traffic to")
+	bpfObj   := flag.String("bpf",   "/ebpf/mirror.bpf.o",    "path to compiled eBPF object file")
+	routesJSON := flag.String("routes", os.Getenv("MIRROR_ROUTES"),
+		`JSON route list, e.g. '[{"apigee":"/api/v1/","ewp":"/v2/"}]'; empty = mirror all paths`)
 	flag.Parse()
+
+	loadRoutes(*routesJSON)
 
 	log.Printf("mirror-agent starting: iface=%s port=%d ewp=%s", *iface, *port, *ewpAddr)
 

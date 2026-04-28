@@ -17,11 +17,17 @@ import (
 )
 
 var (
-	requestCount   atomic.Int64
-	mirroredCount  atomic.Int64
-	successCount   atomic.Int64
-	validationLog  []ValidationEntry
-	validationMu   sync.Mutex
+	requestCount  atomic.Int64
+	mirroredCount atomic.Int64
+	successCount  atomic.Int64
+	validationLog []ValidationEntry
+	validationMu  sync.Mutex
+
+	// readyThreshPct is the minimum per-endpoint pass rate (0–100) required
+	// before ready_to_cut is reported as true. Defaults to 100 (all must pass).
+	// Updated at runtime via PUT /config — no restart needed.
+	threshMu       sync.RWMutex
+	readyThreshPct float64 = 100.0
 )
 
 // ValidationEntry records whether an EWP response matched APIGEE expectations.
@@ -48,6 +54,7 @@ func main() {
 	mux.HandleFunc("/api/v1/users/", usersHandler(logger))
 	mux.HandleFunc("/metrics", metricsHandler(logger))
 	mux.HandleFunc("/validation-report", validationReportHandler(logger))
+	mux.HandleFunc("/config", configHandler(logger))
 	mux.HandleFunc("/", echoHandler(logger))
 
 	addr := fmt.Sprintf(":%d", *port)
@@ -217,11 +224,13 @@ func validationReportHandler(logger *log.Logger) http.HandlerFunc {
 		var totalLatencyMs int64
 
 		type pathStats struct {
-			Total     int   `json:"total"`
-			Passed    int   `json:"passed"`
-			Failed    int   `json:"failed"`
-			AvgLatMs  int64 `json:"avg_latency_ms"`
-			sumLatMs  int64
+			Total      int     `json:"total"`
+			Passed     int     `json:"passed"`
+			Failed     int     `json:"failed"`
+			PassRatePct string `json:"pass_rate"`
+			AvgLatMs   int64   `json:"avg_latency_ms"`
+			ReadyToCut bool    `json:"ready_to_cut"`
+			sumLatMs   int64
 		}
 		byPath := make(map[string]*pathStats)
 
@@ -245,10 +254,21 @@ func validationReportHandler(logger *log.Logger) http.HandlerFunc {
 			}
 		}
 
-		// Compute averages.
+		// Compute per-endpoint averages, pass rate, and ready_to_cut.
+		threshMu.RLock()
+		thresh := readyThreshPct
+		threshMu.RUnlock()
+
+		allEndpointsReady := len(byPath) > 0
 		for _, ps := range byPath {
 			if ps.Total > 0 {
 				ps.AvgLatMs = ps.sumLatMs / int64(ps.Total)
+				rate := safeDiv(ps.Passed, ps.Total) * 100
+				ps.PassRatePct = fmt.Sprintf("%.1f%%", rate)
+				ps.ReadyToCut = rate >= thresh
+			}
+			if !ps.ReadyToCut {
+				allEndpointsReady = false
 			}
 		}
 
@@ -259,16 +279,63 @@ func validationReportHandler(logger *log.Logger) http.HandlerFunc {
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"summary": map[string]interface{}{
-				"total":          total,
-				"passed":         passed,
-				"failed":         total - passed,
-				"pass_rate":      fmt.Sprintf("%.1f%%", safeDiv(passed, total)*100),
-				"avg_latency_ms": avgLatMs,
-				"ready_to_cut":   passed == total && total > 0,
+				"total":               total,
+				"passed":              passed,
+				"failed":              total - passed,
+				"pass_rate":           fmt.Sprintf("%.1f%%", safeDiv(passed, total)*100),
+				"avg_latency_ms":      avgLatMs,
+				"ready_threshold_pct": fmt.Sprintf("%.1f%%", thresh),
+				"ready_to_cut":        allEndpointsReady && total > 0,
 			},
 			"by_path": byPath,
 			"entries": entries,
 		})
+	}
+}
+
+// configHandler exposes runtime knobs for the EWP sim without requiring a restart.
+//
+//	GET  /config  — returns current settings
+//	PUT  /config  — updates settings; body: {"ready_threshold_pct": 99.0}
+//
+// ready_threshold_pct (0–100): minimum per-endpoint pass rate for ready_to_cut.
+// Changing it takes effect immediately on the next /validation-report call.
+func configHandler(logger *log.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			threshMu.RLock()
+			t := readyThreshPct
+			threshMu.RUnlock()
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"ready_threshold_pct": t,
+				"note":                "PUT /config with {\"ready_threshold_pct\": <0-100>} to update without restart",
+			})
+
+		case http.MethodPut, http.MethodPost:
+			var body struct {
+				ReadyThresholdPct float64 `json:"ready_threshold_pct"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad JSON: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if body.ReadyThresholdPct < 0 || body.ReadyThresholdPct > 100 {
+				http.Error(w, "ready_threshold_pct must be between 0 and 100", http.StatusBadRequest)
+				return
+			}
+			threshMu.Lock()
+			readyThreshPct = body.ReadyThresholdPct
+			threshMu.Unlock()
+			logger.Printf("ready_threshold updated → %.1f%%", body.ReadyThresholdPct)
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"ready_threshold_pct": body.ReadyThresholdPct,
+				"status":              "updated",
+			})
+
+		default:
+			http.Error(w, "use GET or PUT", http.StatusMethodNotAllowed)
+		}
 	}
 }
 

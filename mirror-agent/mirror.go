@@ -37,16 +37,23 @@ func NewHTTPMirror(ewpBase string) *HTTPMirror {
 
 // Send replays a captured request to EWP and logs the result.
 // Designed to be called in a goroutine — it does not return results to the caller.
-func (m *HTTPMirror) Send(req *CapturedRequest) {
+// If a route table is configured and the request path does not match any rule,
+// the request is silently dropped and counted as skipped.
+func (m *HTTPMirror) Send(captured *CapturedRequest) {
+	ewpPath, forward := resolveRoute(captured.Path)
+	if !forward {
+		agentStats.mirrorsSkipped.Add(1)
+		return
+	}
 	agentStats.mirrorsSent.Add(1)
-	result := m.doSend(req)
-	m.logResult(req, result)
+	result := m.doSend(captured, ewpPath)
+	m.logResult(captured, result)
 }
 
-func (m *HTTPMirror) doSend(captured *CapturedRequest) MirrorResult {
+func (m *HTTPMirror) doSend(captured *CapturedRequest, ewpPath string) MirrorResult {
 	start := time.Now()
 
-	url := m.ewpBase + captured.Path
+	url := m.ewpBase + ewpPath
 
 	var bodyReader io.Reader
 	if len(captured.Body) > 0 {
@@ -57,7 +64,7 @@ func (m *HTTPMirror) doSend(captured *CapturedRequest) MirrorResult {
 	if err != nil {
 		return MirrorResult{
 			Method: captured.Method,
-			Path:   captured.Path,
+			Path:   ewpPath,
 			Error:  err,
 		}
 	}
@@ -79,7 +86,7 @@ func (m *HTTPMirror) doSend(captured *CapturedRequest) MirrorResult {
 	if err != nil {
 		return MirrorResult{
 			Method:  captured.Method,
-			Path:    captured.Path,
+			Path:    ewpPath,
 			Latency: time.Since(start),
 			Error:   err,
 		}
@@ -90,7 +97,7 @@ func (m *HTTPMirror) doSend(captured *CapturedRequest) MirrorResult {
 
 	return MirrorResult{
 		Method:     captured.Method,
-		Path:       captured.Path,
+		Path:       ewpPath,
 		StatusCode: resp.StatusCode,
 		Body:       body,
 		Latency:    time.Since(start),
