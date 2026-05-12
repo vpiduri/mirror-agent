@@ -298,6 +298,21 @@ Takes effect immediately on the next `/validation-report` call. No data is reset
 
 ---
 
+## Scope and known limitations
+
+This tool validates **proxy-layer behavior** between the POD (Point-of-Departure) APIGEE proxy and the POA (Point-of-Arrival) EWP proxy. `ready_to_cut: true` means EWP routes correctly and returns equivalent HTTP status codes for all mirrored traffic. It does **not** mean the migration is safe end-to-end.
+
+| Covered | Not covered |
+|---|---|
+| HTTP status code parity (2xx/4xx/5xx) | APIGEE vs EWP response header diff (requires egress capture) |
+| EWP response latency | Response body / JSON schema comparison |
+| EWP endpoint availability (404 = missing route) | Headers Envoy adds to requests before reaching the backend (`x-forwarded-for`, `x-envoy-*`, JWT claims) — the **API provider app** may behave differently |
+| Response headers EWP returns | New headers Envoy adds to responses visible to clients (`x-envoy-upstream-service-time`, `server: envoy`, security headers) — **API consumer apps** that parse response headers may break even when status codes pass |
+
+Validate the provider app layer and consumer app layer separately with integration tests, contract tests, or canary traffic with client-side monitoring.
+
+---
+
 ## Cutover decision criteria
 
 | Metric | Green | Yellow | Red |

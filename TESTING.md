@@ -20,6 +20,42 @@ Both processes (APIGEE simulator and eBPF mirror agent) run **inside the same co
 
 ---
 
+## Scope of Comparison and Known Limitations
+
+### What this tool compares
+
+| Signal | How it is measured |
+|---|---|
+| HTTP response status code class (2xx / 4xx / 5xx) | Every mirrored request is replayed to EWP; the response code determines pass/fail |
+| Response latency | Per-endpoint average latency from EWP is tracked in ms |
+| Endpoint availability | A 404 from EWP means the route is not implemented yet |
+| Response headers returned by EWP | Aggregated per endpoint in `response_headers_observed` |
+
+### What this tool does NOT compare
+
+| Gap | Explanation |
+|---|---|
+| APIGEE response headers vs EWP response headers | The eBPF hook captures client→APIGEE **ingress** only. APIGEE's outbound responses to clients are not captured, so a header-by-header diff between the two proxies is not possible without adding a separate TC **egress** hook on the same interface. |
+| Response body content or JSON schema | EWP may return structurally different payloads (different field names, added or removed fields) while still returning a 2xx status code. This passes the mirror validation but may break API consumers. A contract test suite is needed for body comparison. |
+| Request headers visible to the API provider (backend) app | Envoy/EWP injects headers before forwarding to the backend — `x-forwarded-for`, `x-envoy-*`, `grpc-status`, JWT claim headers, etc. The backend application may behave differently because of these additions, and that difference is invisible to this tool. |
+| Response headers visible to the API consumer (client) app | Envoy adds consumer-visible headers such as `x-envoy-upstream-service-time`, `x-request-id`, and `server: envoy`, and may strip or rewrite APIGEE-specific headers. Client applications that parse, log, or validate response headers may break even when all status codes pass. |
+
+### POD → POA proxy migration context
+
+> **Note to engineering teams evaluating this tool for the APIGEE → EWP migration:**
+>
+> This mechanism validates **proxy-layer behavior** between the **POD (Point-of-Departure) APIGEE proxy** and the **POA (Point-of-Arrival) EWP proxy**. A passing result (`ready_to_cut: true`) confirms that EWP correctly routes the same traffic and returns equivalent HTTP status codes for every mirrored endpoint.
+>
+> **It does not confirm that the migration is safe at the API provider app layer or the API consumer app layer.**
+>
+> - **API provider app layer** — the backend service that APIGEE/EWP proxies to. Envoy's request transformation (auth headers, x-forwarded-for, grpc metadata) differs from APIGEE's. Backend behaviour changes driven by these header differences will not show up in this tool. Validate separately with integration tests that exercise the backend directly through EWP.
+>
+> - **API consumer app layer** — the client application calling the API. New response headers injected by Envoy (e.g. `x-envoy-upstream-service-time`, security headers, modified `server` header), changes to error response bodies, or differences in OAuth/JWT flows are all invisible to this tool. Validate separately with canary traffic + client-side monitoring or contract tests.
+>
+> In short: use this tool to confirm **EWP can handle the same requests as APIGEE**. Use integration and contract tests to confirm **nothing breaks above or below the proxy layer**.
+
+---
+
 ## Option 1: WSL2 (Windows with WSL2 + Docker Desktop)
 
 ### Prerequisites

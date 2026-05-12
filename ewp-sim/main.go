@@ -30,15 +30,16 @@ var (
 	readyThreshPct float64 = 100.0
 )
 
-// ValidationEntry records whether an EWP response matched APIGEE expectations.
+// ValidationEntry records one mirrored request and the EWP response outcome.
 type ValidationEntry struct {
-	Time       time.Time     `json:"time"`
-	Method     string        `json:"method"`
-	Path       string        `json:"path"`
-	StatusCode int           `json:"status_code"`
-	LatencyMs  int64         `json:"latency_ms"`
-	Passed     bool          `json:"passed"`
-	Note       string        `json:"note,omitempty"`
+	Time            time.Time         `json:"time"`
+	Method          string            `json:"method"`
+	Path            string            `json:"path"`
+	StatusCode      int               `json:"status_code"`
+	LatencyMs       int64             `json:"latency_ms"`
+	Passed          bool              `json:"passed"`
+	Note            string            `json:"note,omitempty"`
+	ResponseHeaders map[string]string `json:"response_headers,omitempty"`
 }
 
 func main() {
@@ -116,8 +117,8 @@ func productsHandler(logger *log.Logger) http.HandlerFunc {
 			return
 		}
 
-		record(logger, r, statusCode, time.Since(start), isMirrored)
 		writeJSON(w, statusCode, respBody)
+		record(logger, r, statusCode, time.Since(start), isMirrored, w.Header())
 	}
 }
 
@@ -157,8 +158,8 @@ func ordersHandler(logger *log.Logger) http.HandlerFunc {
 			return
 		}
 
-		record(logger, r, statusCode, time.Since(start), isMirrored)
 		writeJSON(w, statusCode, respBody)
+		record(logger, r, statusCode, time.Since(start), isMirrored, w.Header())
 	}
 }
 
@@ -176,7 +177,6 @@ func usersHandler(logger *log.Logger) http.HandlerFunc {
 			userID = "unknown"
 		}
 		statusCode := http.StatusOK
-		record(logger, r, statusCode, time.Since(start), isMirrored)
 		writeJSON(w, statusCode, map[string]interface{}{
 			"userId":    userID,
 			"name":      "Test User",
@@ -186,6 +186,7 @@ func usersHandler(logger *log.Logger) http.HandlerFunc {
 			"platform":  "service-mesh",
 			"timestamp": time.Now().UTC(),
 		})
+		record(logger, r, statusCode, time.Since(start), isMirrored, w.Header())
 	}
 }
 
@@ -224,13 +225,14 @@ func validationReportHandler(logger *log.Logger) http.HandlerFunc {
 		var totalLatencyMs int64
 
 		type pathStats struct {
-			Total      int     `json:"total"`
-			Passed     int     `json:"passed"`
-			Failed     int     `json:"failed"`
-			PassRatePct string `json:"pass_rate"`
-			AvgLatMs   int64   `json:"avg_latency_ms"`
-			ReadyToCut bool    `json:"ready_to_cut"`
-			sumLatMs   int64
+			Total           int               `json:"total"`
+			Passed          int               `json:"passed"`
+			Failed          int               `json:"failed"`
+			PassRatePct     string            `json:"pass_rate"`
+			AvgLatMs        int64             `json:"avg_latency_ms"`
+			ReadyToCut      bool              `json:"ready_to_cut"`
+			ResponseHeaders map[string]string `json:"response_headers_observed"`
+			sumLatMs        int64
 		}
 		byPath := make(map[string]*pathStats)
 
@@ -242,7 +244,7 @@ func validationReportHandler(logger *log.Logger) http.HandlerFunc {
 
 			ps := byPath[e.Method+" "+e.Path]
 			if ps == nil {
-				ps = &pathStats{}
+				ps = &pathStats{ResponseHeaders: make(map[string]string)}
 				byPath[e.Method+" "+e.Path] = ps
 			}
 			ps.Total++
@@ -251,6 +253,10 @@ func validationReportHandler(logger *log.Logger) http.HandlerFunc {
 				ps.Passed++
 			} else {
 				ps.Failed++
+			}
+			// Accumulate latest value for each response header seen on this endpoint.
+			for k, v := range e.ResponseHeaders {
+				ps.ResponseHeaders[k] = v
 			}
 		}
 
@@ -288,6 +294,43 @@ func validationReportHandler(logger *log.Logger) http.HandlerFunc {
 				"ready_to_cut":        allEndpointsReady && total > 0,
 			},
 			"by_path": byPath,
+
+			// comparison_scope describes exactly what this tool measures and
+			// what it deliberately does not measure. Share this with any team
+			// evaluating migration readiness.
+			"comparison_scope": map[string]interface{}{
+				"what_is_compared": []string{
+					"HTTP response status code class (2xx / 4xx / 5xx) per mirrored request",
+					"Response latency (per-endpoint average, ms)",
+					"Endpoint availability — 404 from EWP means the route is not implemented yet",
+					"Response headers returned by EWP (see response_headers_observed per endpoint)",
+				},
+				"what_is_not_compared": []string{
+					"APIGEE response headers vs EWP response headers — the eBPF hook captures " +
+						"client→APIGEE ingress only; APIGEE's outbound responses are not captured, " +
+						"so a header-by-header diff is not possible without also adding an egress hook",
+					"Response body content or JSON schema — EWP may return structurally different " +
+						"payloads with the same status code; body comparison requires an egress hook " +
+						"or a dedicated contract test suite",
+					"Request transformations visible to the API provider (backend) app — " +
+						"Envoy/EWP adds headers (x-forwarded-for, x-envoy-*, grpc-status, etc.) " +
+						"before forwarding to the backend; the backend may behave differently " +
+						"because of these additions, which this tool cannot detect",
+					"Response header additions visible to the API consumer (client) app — " +
+						"Envoy adds headers such as x-envoy-upstream-service-time, x-request-id, " +
+						"server: envoy, and may modify or strip APIGEE-specific headers; client " +
+						"applications that parse or validate response headers may break even when " +
+						"the status code passes",
+				},
+				"migration_context": "This tool compares proxy-layer behavior between the " +
+					"POD (Point-of-Departure) APIGEE proxy and the POA (Point-of-Arrival) EWP proxy. " +
+					"A passing result confirms that EWP routes correctly and returns equivalent " +
+					"HTTP status codes for the same traffic. It does not confirm that the API " +
+					"provider application or API consumer application are unaffected by the migration. " +
+					"Provider-layer and consumer-layer compatibility must be validated separately " +
+					"(contract tests, integration tests, or canary traffic with client-side monitoring).",
+			},
+
 			"entries": entries,
 		})
 	}
@@ -354,19 +397,23 @@ func echoHandler(logger *log.Logger) http.HandlerFunc {
 			}
 		}
 		statusCode := http.StatusOK
-		record(logger, r, statusCode, time.Since(start), isMirrored)
 		writeJSON(w, statusCode, map[string]interface{}{
-			"message":    "request received by EWP simulator",
-			"method":     r.Method,
-			"path":       r.URL.Path,
-			"headers":    headers,
-			"source":     "ewp",
-			"is_mirror":  isMirrored,
+			"message":   "request received by EWP simulator",
+			"method":    r.Method,
+			"path":      r.URL.Path,
+			"headers":   headers,
+			"source":    "ewp",
+			"is_mirror": isMirrored,
 		})
+		record(logger, r, statusCode, time.Since(start), isMirrored, w.Header())
 	}
 }
 
-func record(logger *log.Logger, r *http.Request, statusCode int, latency time.Duration, isMirrored bool) {
+// record logs and stores the outcome of one mirrored request.
+// respHeader is the http.Header from the ResponseWriter after writing — it
+// captures every header EWP set, including any that Envoy would add in
+// production (e.g. x-envoy-upstream-service-time, x-request-id, server).
+func record(logger *log.Logger, r *http.Request, statusCode int, latency time.Duration, isMirrored bool, respHeader http.Header) {
 	passed := statusCode >= 200 && statusCode < 300
 	if passed && isMirrored {
 		successCount.Add(1)
@@ -384,14 +431,23 @@ func record(logger *log.Logger, r *http.Request, statusCode int, latency time.Du
 				r.Method, r.URL.Path, statusCode, latency.Round(time.Millisecond))
 		}
 
+		// Snapshot response headers (first value per name, lowercase).
+		headers := make(map[string]string, len(respHeader))
+		for k, vs := range respHeader {
+			if len(vs) > 0 {
+				headers[strings.ToLower(k)] = vs[0]
+			}
+		}
+
 		entry := ValidationEntry{
-			Time:       time.Now().UTC(),
-			Method:     r.Method,
-			Path:       r.URL.Path,
-			StatusCode: statusCode,
-			LatencyMs:  latency.Milliseconds(),
-			Passed:     passed,
-			Note:       note,
+			Time:            time.Now().UTC(),
+			Method:          r.Method,
+			Path:            r.URL.Path,
+			StatusCode:      statusCode,
+			LatencyMs:       latency.Milliseconds(),
+			Passed:          passed,
+			Note:            note,
+			ResponseHeaders: headers,
 		}
 		validationMu.Lock()
 		validationLog = append(validationLog, entry)
